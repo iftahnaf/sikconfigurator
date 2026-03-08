@@ -137,6 +137,12 @@ radio_config_*.json
 *.log
 logs/
 
+# SSL certificates (never commit private keys)
+nginx/certs/*.pem
+nginx/certs/*.key
+nginx/certs/*.crt
+nginx/certbot/
+
 # OS
 .DS_Store
 Thumbs.db

@@ -1,0 +1,14 @@
+**/__pycache__
+**/*.pyc
+**/*.pyo
+*.egg-info/
+venv/
+.venv/
+.git/
+.github/
+tests/
+*.md
+.env
+.env.*
+!.env.example
+20260205_344sik/
