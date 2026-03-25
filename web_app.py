@@ -214,6 +214,40 @@ def factory_reset():
         return _err(str(exc), 500)
 
 
+# ── radio recovery (stuck / red LED) ─────────────────────────────────────────
+@app.route("/api/recover", methods=["POST"])
+def recover_radio():
+    global protocol
+    data = request.get_json(force=True, silent=True) or {}
+    port = data.get("port", "").strip()
+
+    if not port:
+        ports = [p.device for p in serial.tools.list_ports.comports()]
+        if not ports:
+            return _err("No serial ports found")
+        port = ports[0]
+
+    if protocol and protocol.is_connected():
+        protocol.disconnect()
+        protocol = None
+
+    p = SIKRadioProtocol(port, baudrate=57600)
+    try:
+        import serial as _serial
+        p.ser = _serial.Serial(port, 57600, timeout=1.0, write_timeout=1.0)
+    except Exception as exc:
+        return _err(f"Cannot open port {port}: {exc}")
+
+    result = p.recover()
+
+    if result["success"] and result.get("working_baud"):
+        protocol = p
+    else:
+        p.disconnect()
+
+    return jsonify(result)
+
+
 # ── health check ─────────────────────────────────────────────────────────────
 @app.route("/health")
 def health():

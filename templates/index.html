@@ -650,6 +650,17 @@ select.ctrl {
 .modal p  { color: var(--text2); font-size: 13px; line-height: 1.6; margin-bottom: 20px; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 10px; }
 
+/* ── recover button ── */
+.btn-recover {
+  background: transparent;
+  color: var(--red);
+  border: 1px solid var(--red);
+  opacity: 0.85;
+}
+.btn-recover:hover:not(:disabled) { background: rgba(237,85,85,.12); opacity: 1; }
+.btn-recover:disabled { opacity: 0.35; cursor: not-allowed; }
+.btn-recover.running { opacity: 0.6; cursor: wait; }
+
 /* ── repo link + release badge ── */
 .repo-link,
 .release-badge {
@@ -745,6 +756,10 @@ select.ctrl {
     <button class="btn btn-secondary" id="btn-disconnect" disabled>
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
       Disconnect
+    </button>
+    <button class="btn btn-recover" id="btn-recover" title="Radio stuck with solid red LED? Click to auto-detect baud rate and escape bootloader.">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-3.5"/></svg>
+      Recover Radio
     </button>
 
     <div class="conn-indicator disconnected" id="conn-indicator">
@@ -1159,6 +1174,52 @@ document.getElementById('btn-disconnect').addEventListener('click', async () => 
   setConnectedUI(false);
   setStatus('Disconnected');
   toast('Disconnected', 'info');
+});
+
+// ── Recover Radio ─────────────────────────────────────────────────────────────
+document.getElementById('btn-recover').addEventListener('click', async () => {
+  const port = document.getElementById('port-select').value;
+  const btn  = document.getElementById('btn-recover');
+  if (!port) { toast('Select a port first', 'error'); return; }
+
+  btn.classList.add('running');
+  btn.disabled = true;
+  const orig = btn.innerHTML;
+  btn.innerHTML = '<span class="spinner"></span> Recovering…';
+  setStatus('Scanning baud rates + probing bootloader…');
+  toast('Recovery started — scanning all baud rates…', 'info');
+
+  const res = await api('/api/recover', {
+    method: 'POST',
+    body: JSON.stringify({ port }),
+  });
+
+  btn.innerHTML = orig;
+  btn.disabled  = false;
+  btn.classList.remove('running');
+
+  if (res.success) {
+    const baud = res.working_baud;
+    if (baud) {
+      // Update the baud selector to the discovered rate
+      const baudSel = document.getElementById('baud-select');
+      if (![...baudSel.options].some(o => parseInt(o.value) === baud)) {
+        baudSel.add(new Option(String(baud), String(baud)));
+      }
+      baudSel.value = String(baud);
+      setConnectedUI(true, port, baud);
+      setStatus(`Recovered — ${port} @ ${baud}`);
+      toast(`${res.message}`, 'success');
+      loadInfo();
+    } else {
+      // Bootloader was rebooted but baud not yet known — prompt manual connect
+      setStatus('Bootloader rebooted — try Connect now');
+      toast(res.message, 'info');
+    }
+  } else {
+    setStatus('Recovery failed');
+    toast(res.message || 'Recovery failed — radio not responding', 'error');
+  }
 });
 
 /* ═════════════════════════════════════════════════════════════════════════

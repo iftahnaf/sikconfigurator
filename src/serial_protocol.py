@@ -478,10 +478,139 @@ class SIKRadioProtocol:
         """Exit AT command mode and return to transparent mode."""
         self._send_command("ATO")
         response = self._read_response()
-        
+
         if 'OK' in response:
             self.mode = RadioMode.TRANSPARENT
             logger.info("Entered transparent mode")
             return True
-        
+
         return False
+
+    # ── recovery ──────────────────────────────────────────────────────────────
+
+    # SiK bootloader protocol bytes
+    _BL_INSYNC   = 0x12
+    _BL_EOC      = 0x03
+    _BL_OK       = 0x10
+    _BL_GET_SYNC = 0x21
+    _BL_REBOOT   = 0x30
+    _BL_BAUD     = 115200
+
+    def _scan_baud_rates(self) -> Optional[int]:
+        """
+        Open the port at each standard baud rate and attempt +++ AT entry.
+        Returns the first baud rate that gets an OK, or None.
+        """
+        rates = [57600, 115200, 9600, 38400, 19200, 230400, 460800, 4800, 2400, 1200]
+        for baud in rates:
+            logger.info(f"Recovery scan: trying {baud} baud …")
+            try:
+                if self.ser and self.ser.is_open:
+                    self.ser.close()
+                self.ser = serial.Serial(self.port, baud, timeout=0.5, write_timeout=1.0)
+                self.ser.reset_input_buffer()
+
+                time.sleep(0.6)           # pre-guard
+                self.ser.write(b'+++')
+                self.ser.flush()
+                time.sleep(1.2)           # post-guard
+
+                raw = b''
+                while self.ser.in_waiting:
+                    raw += self.ser.read(self.ser.in_waiting)
+                    time.sleep(0.05)
+
+                if b'OK' in raw:
+                    logger.info(f"Radio responds at {baud} baud")
+                    return baud
+            except serial.SerialException as exc:
+                logger.debug(f"Baud {baud} error: {exc}")
+
+        return None
+
+    def _detect_and_escape_bootloader(self) -> bool:
+        """
+        Try to communicate with the SiK bootloader at 115200 baud.
+        If detected, send REBOOT so the radio boots into firmware.
+        Returns True if bootloader was detected (and reboot command was sent).
+        """
+        logger.info("Recovery: probing for bootloader at 115200 …")
+        try:
+            if self.ser and self.ser.is_open:
+                self.ser.close()
+            self.ser = serial.Serial(self.port, self._BL_BAUD, timeout=0.5, write_timeout=1.0)
+
+            # Autobaud: flood NOPs so the bootloader can measure our baud rate
+            self.ser.reset_input_buffer()
+            self.ser.write(bytes([0x00] * 32))
+            self.ser.flush()
+            time.sleep(0.15)
+            self.ser.reset_input_buffer()
+
+            # GET_SYNC
+            self.ser.write(bytes([self._BL_GET_SYNC, self._BL_EOC]))
+            self.ser.flush()
+            time.sleep(0.25)
+
+            resp = self.ser.read(2)
+            if len(resp) == 2 and resp[0] == self._BL_INSYNC and resp[1] == self._BL_OK:
+                logger.info("SiK bootloader confirmed — sending REBOOT …")
+                self.ser.write(bytes([self._BL_REBOOT, self._BL_EOC]))
+                self.ser.flush()
+                self.mode = RadioMode.BOOTLOADER
+                return True
+
+            logger.debug(f"Bootloader probe got: {resp.hex() if resp else 'nothing'}")
+            return False
+
+        except serial.SerialException as exc:
+            logger.debug(f"Bootloader probe error: {exc}")
+            return False
+
+    def recover(self) -> Dict:
+        """
+        High-level recovery for a radio showing a solid red LED (stuck / wrong baud).
+
+        Strategy:
+          1. Scan all standard baud rates for an AT-mode response.
+          2. If that fails, try the SiK bootloader protocol and send REBOOT.
+          3. After a reboot, scan baud rates again.
+
+        Returns a dict::
+
+            {
+              'success':      bool,
+              'method':       'baud_scan' | 'bootloader_escape' | None,
+              'working_baud': int | None,
+              'message':      str,
+            }
+        """
+        result: Dict = {'success': False, 'method': None, 'working_baud': None, 'message': ''}
+
+        # ── step 1: baud scan ──────────────────────────────────────────────────
+        baud = self._scan_baud_rates()
+        if baud:
+            self.baudrate = baud
+            self.mode = RadioMode.AT_COMMAND
+            result.update(success=True, method='baud_scan', working_baud=baud,
+                          message=f"Radio found at {baud} baud")
+            return result
+
+        # ── step 2: bootloader escape ─────────────────────────────────────────
+        escaped = self._detect_and_escape_bootloader()
+        if escaped:
+            time.sleep(2.5)   # wait for firmware to start
+            baud = self._scan_baud_rates()
+            if baud:
+                self.baudrate = baud
+                self.mode = RadioMode.AT_COMMAND
+                result.update(success=True, method='bootloader_escape', working_baud=baud,
+                              message=f"Escaped bootloader → firmware responding at {baud} baud")
+            else:
+                # Reboot was sent but radio still hasn't come up; caller can retry connect
+                result.update(success=True, method='bootloader_escape', working_baud=None,
+                              message="Bootloader reboot sent — try connecting now (57600 baud)")
+            return result
+
+        result['message'] = "Radio not responding at any baud rate and bootloader not detected"
+        return result
